@@ -1,0 +1,22 @@
+# Dataset e file di dati
+*.csv
+*.tsv
+*.zip
+
+# Volumi Docker (i database fisici)
+pg_data/
+neo4j_data/
+neo4j_logs/
+neo4j_import/
+neo4j_plugins/
+
+# Python e Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.env
+
+# File di sistema OS
+.DS_Store
+Thumbs.db

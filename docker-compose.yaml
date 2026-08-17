@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_volis
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: flights_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d/
+    # Healthcheck per Postgres: verifica che il DB sia pronto ad accettare connessioni
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flights_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5.15.0
+    container_name: neo4j_volis
+    environment:
+      NEO4J_AUTH: neo4j/password123
+      # Configurazione della Memoria (Cruciale per benchmark scientificamente validi)
+      #NEO4J_server_memory_heap_initial__size: 512m
+      #NEO4J_server_memory_heap_max__size: 768m
+      #NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "7474:7474" # Interfaccia Web Browser
+      - "7687:7687" # Porta Bolt per Python
+    volumes:
+      - neo4jdata:/data
+      - neo4jimport:/var/lib/neo4j/import
+      - ./neo4j:/scripts
+    # Healthcheck per Neo4j: verifica che l'interfaccia HTTP sia online
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # Container "Sidecar": si avvia solo quando Neo4j è 'healthy', esegue lo script Cypher e poi si spegne
+  neo4j-init:
+    image: neo4j:5.15.0
+    container_name: neo4j_init_constraints
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./neo4j:/scripts
+    command: >
+      bash -c "echo 'Inizializzazione dei vincoli Neo4j in corso...' &&
+      cypher-shell -a neo4j://neo4j:7687 -u neo4j -p password123 -f /scripts/init_constraints.cypher &&
+      echo 'Inizializzazione completata con successo!'"
+
+volumes:
+  pgdata:
+  neo4jdata:
+  neo4jimport:
