@@ -10,7 +10,7 @@ AIRPORTS_CSV = os.path.join(DATA_DIR, "airports.csv")
 AIRLINES_CSV = os.path.join(DATA_DIR, "airlines.csv")
 
 # Connessioni configurate tramite Variabili d'Ambiente (con fallback di default per test locali)
-PG_URI = os.getenv("PG_URI", "postgresql://postgres:password123@localhost:5432/flights_db")
+PG_URI = os.getenv("PG_URI", "postgresql://postgres:database@localhost:5432/flights_db")
 pg_engine = create_engine(PG_URI)
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
