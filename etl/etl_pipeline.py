@@ -9,7 +9,6 @@ FLIGHTS_CSV = os.path.join(DATA_DIR, "flights.csv")
 AIRPORTS_CSV = os.path.join(DATA_DIR, "airports.csv")
 AIRLINES_CSV = os.path.join(DATA_DIR, "airlines.csv")
 
-# Connessioni configurate tramite Variabili d'Ambiente (con fallback di default per test locali)
 PG_URI = os.getenv("PG_URI", "postgresql://postgres:database@localhost:5432/flights_db")
 pg_engine = create_engine(PG_URI)
 
@@ -21,14 +20,15 @@ def run_etl():
     print("=== INIZIO PIPELINE ETL ===")
     
     # 0. IDEMPOTENZA E CONSISTENZA INIZIALE
-    # Svuotiamo il database PostgreSQL prima di partire. 
-    # Neo4j è gestito in modo sicuro tramite i MERGE e i vincoli IS UNIQUE.
     print("Pulizia iniziale del database relazionale (TRUNCATE) per garantire l'idempotenza...")
     with pg_engine.connect() as conn:
         conn.execute(text("TRUNCATE flights, airports, airlines CASCADE;"))
         conn.commit()
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+
+    # Nota: I vincoli e gli indici di Neo4j vengono applicati dal container Docker 'neo4j-init'.
+    # Assicurati che il file init_constraints.cypher sia configurato correttamente prima di avviare.
 
     # ==========================================
     # 1. CARICAMENTO DELLE ANAGRAFICHE (SQL & Neo4j)
@@ -38,9 +38,7 @@ def run_etl():
     if os.path.exists(AIRLINES_CSV):
         df_airlines = pd.read_csv(AIRLINES_CSV)
         df_airlines.columns = ['iata_code', 'airline_name']
-        # Load SQL
         df_airlines.to_sql("airlines", pg_engine, if_exists="append", index=False)
-        # Load Neo4j
         load_airlines_neo4j(driver, df_airlines)
         print(f"Caricate {len(df_airlines)} compagnie su DB Relazionale e Grafo.")
         
@@ -48,9 +46,7 @@ def run_etl():
         df_airports = pd.read_csv(AIRPORTS_CSV)
         df_airports = df_airports[['IATA_CODE', 'AIRPORT', 'CITY', 'STATE', 'LATITUDE', 'LONGITUDE']].dropna(subset=['IATA_CODE'])
         df_airports.columns = ['iata_code', 'airport_name', 'city', 'state', 'latitude', 'longitude']
-        # Load SQL
         df_airports.to_sql("airports", pg_engine, if_exists="append", index=False)
-        # Load Neo4j
         load_airports_neo4j(driver, df_airports)
         print(f"Caricati {len(df_airports)} aeroporti su DB Relazionale e Grafo.")
 
@@ -60,18 +56,12 @@ def run_etl():
     print("Elaborazione dei voli in corso...")
     
     if os.path.exists(FLIGHTS_CSV):
-        chunk_size = 25000  # Ridotto a 25k per evitare pressione sulla Garbage Collection di Neo4j
+        chunk_size = 25000
         
         for chunk_idx, chunk in enumerate(pd.read_csv(FLIGHTS_CSV, chunksize=chunk_size, low_memory=False)):
-            
-            # Filtro Data Quality (Lunghezza == 3)
             chunk = chunk[chunk['ORIGIN_AIRPORT'].astype(str).str.len() == 3]
             chunk = chunk[chunk['DESTINATION_AIRPORT'].astype(str).str.len() == 3]
             
-            # --- NOTA ARCHITETTURALE SULL'INDICE (flight_id) ---
-            # L'utilizzo di `chunk.index` è sicuro perché `pd.read_csv` con `chunksize`
-            # mantiene un contatore continuo dell'indice tra un chunk e l'altro.
-            # In architetture con lettura parallela, andrebbe sostituito con un UUID.
             df_cleaned = pd.DataFrame({
                 'flight_id': chunk.index, 
                 'year': chunk['YEAR'],
@@ -83,26 +73,40 @@ def run_etl():
                 'tail_number': chunk['TAIL_NUMBER'],
                 'origin_airport': chunk['ORIGIN_AIRPORT'],
                 'destination_airport': chunk['DESTINATION_AIRPORT'],
-                'departure_delay': chunk['DEPARTURE_DELAY'].fillna(0).astype(int),
-                'arrival_delay': chunk['ARRIVAL_DELAY'].fillna(0).astype(int),
+                'departure_delay': chunk['DEPARTURE_DELAY'].astype('Int64').replace({pd.NA: None}),
+                'arrival_delay': chunk['ARRIVAL_DELAY'].astype('Int64').replace({pd.NA: None}),
                 'distance': chunk['DISTANCE'].fillna(0).astype(int),
                 'cancelled': chunk['CANCELLED'],
                 'cancellation_reason': chunk['CANCELLATION_REASON']
             })
             
-            # --- LOAD SU POSTGRESQL ---
-            # Rimosso method='multi' per prevenire crolli di memoria in SQLAlchemy con grandi chunk
             df_cleaned.to_sql("flights", pg_engine, if_exists="append", index=False)
-            
-            # --- LOAD SU NEO4J ---
             load_flights_to_neo4j(driver, df_cleaned)
             
             print(f"Elaborato e caricato chunk {chunk_idx + 1} (~{len(df_cleaned)} record validi).")
 
-        # ---> INSERISCI QUI L'ARRICCHIMENTO <---
-        # Lo lanciamo solo se abbiamo effettivamente trovato e caricato i voli
-        print("Creazione del Modello Topologico in corso...")
+        # ==========================================
+        # 3. ARRICCHIMENTO STRUTTURALE (Viste e Topologia)
+        # ==========================================
+        print("Creazione del Modello Topologico e della Vista SQL in corso...")
         enrich_graph_topology(driver)
+        
+        enrich_sql_topology(pg_engine)
+
+        # Controllo finale di coerenza
+        print("\nVerifica di coerenza strutturale...")
+        with pg_engine.connect() as conn:
+            n_pg = conn.execute(text("SELECT COUNT(*) FROM routes;")).scalar()
+        with driver.session() as session:
+            n_neo = session.run("MATCH ()-[r:ROUTE]->() RETURN COUNT(r) AS n").single()["n"]
+
+        print(f"Rotte aggregate in Postgres (vista routes): {n_pg}")
+        print(f"Rotte aggregate in Neo4j (arco :ROUTE)    : {n_neo}")
+        
+        if n_pg == n_neo:
+            print("OK: Stessa quantità di informazione. Il benchmark è equo.")
+        else:
+            print("ATTENZIONE: i due insiemi NON coincidono. Verificare i dati sorgente.")
 
         print("=== PIPELINE ETL COMPLETATA CON SUCCESSO ===")
     else:
@@ -112,7 +116,7 @@ def run_etl():
     pg_engine.dispose()
 
 # ==========================================
-# FUNZIONI CYPHER BATCH
+# FUNZIONI DI SUPPORTO
 # ==========================================
 
 def load_airlines_neo4j(driver, df):
@@ -140,13 +144,10 @@ def load_airports_neo4j(driver, df):
 def load_flights_to_neo4j(driver, df):
     query = """
     UNWIND $batch AS row
-    
-    // Usiamo MATCH invece di MERGE perché le anagrafiche sono già caricate (Estrema velocità)
     MATCH (origin:Airport {iata_code: row.origin_airport})
     MATCH (dest:Airport {iata_code: row.destination_airport})
     MATCH (airline:Airline {iata_code: row.airline_code})
     
-    // Creazione Nodo Volo con il flight_id (Risolve il problema del Constraint)
     CREATE (f:Flight {
         flight_id: row.flight_id,
         year: row.year,
@@ -176,6 +177,23 @@ def enrich_graph_topology(driver):
     with driver.session() as session:
         session.run(query)
     print("Arricchimento completato: Grafo Topologico pronto per il pathfinding!")
+
+def enrich_sql_topology(pg_engine):
+    print("Avvio Arricchimento SQL: Creazione della vista materializzata 'routes'...")
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS routes;"))
+        conn.execute(text("""
+            CREATE MATERIALIZED VIEW routes AS
+            SELECT origin_airport,
+                   destination_airport,
+                   COUNT(*) AS num_voli,
+                   ROUND(AVG(departure_delay), 2) AS ritardo_medio
+            FROM flights
+            GROUP BY origin_airport, destination_airport;
+        """))
+        conn.execute(text("CREATE INDEX idx_routes_origin ON routes(origin_airport);"))
+        conn.execute(text("ANALYZE routes;"))
+    print("Arricchimento SQL completato: Vista 'routes' pronta e indicizzata!")
 
 if __name__ == "__main__":
     run_etl()
