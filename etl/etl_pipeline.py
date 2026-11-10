@@ -3,7 +3,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from neo4j import GraphDatabase
 
-# --- CONFIGURAZIONE PERCORSI E CONNESSIONI ---
+# Configurazione percorsi e connessioni
 DATA_DIR = "../data"
 FLIGHTS_CSV = os.path.join(DATA_DIR, "flights.csv")
 AIRPORTS_CSV = os.path.join(DATA_DIR, "airports.csv")
@@ -16,23 +16,19 @@ NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password123")
 NEO4J_AUTH = ("neo4j", NEO4J_PASSWORD)
 
+# Funzione principale per la pipeline ETL
 def run_etl():
     print("=== INIZIO PIPELINE ETL ===")
     
-    # 0. IDEMPOTENZA E CONSISTENZA INIZIALE
-    print("Pulizia iniziale del database relazionale (TRUNCATE) per garantire l'idempotenza...")
+    # Pulizia iniziale del database relazionale per la riproducibilità dei test
+    print("Pulizia iniziale del database relazionale...")
     with pg_engine.connect() as conn:
         conn.execute(text("TRUNCATE flights, airports, airlines CASCADE;"))
         conn.commit()
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
-    # Nota: I vincoli e gli indici di Neo4j vengono applicati dal container Docker 'neo4j-init'.
-    # Assicurati che il file init_constraints.cypher sia configurato correttamente prima di avviare.
-
-    # ==========================================
-    # 1. CARICAMENTO DELLE ANAGRAFICHE (SQL & Neo4j)
-    # ==========================================
+    # Caricamento delle anagrafiche
     print("Caricamento anagrafiche in corso...")
     
     if os.path.exists(AIRLINES_CSV):
@@ -50,9 +46,7 @@ def run_etl():
         load_airports_neo4j(driver, df_airports)
         print(f"Caricati {len(df_airports)} aeroporti su DB Relazionale e Grafo.")
 
-    # ==========================================
-    # 2. ESTRAZIONE E PULIZIA DEI VOLI (Chunking)
-    # ==========================================
+    # Caricamento dei voli in chunk e pulizia dei dati
     print("Elaborazione dei voli in corso...")
     
     if os.path.exists(FLIGHTS_CSV):
@@ -85,9 +79,7 @@ def run_etl():
             
             print(f"Elaborato e caricato chunk {chunk_idx + 1} (~{len(df_cleaned)} record validi).")
 
-        # ==========================================
-        # 3. ARRICCHIMENTO STRUTTURALE (Viste e Topologia)
-        # ==========================================
+        # Creazione del Modello Topologico e della Vista SQL
         print("Creazione del Modello Topologico e della Vista SQL in corso...")
         enrich_graph_topology(driver)
         
@@ -104,9 +96,9 @@ def run_etl():
         print(f"Rotte aggregate in Neo4j (arco :ROUTE)    : {n_neo}")
         
         if n_pg == n_neo:
-            print("OK: Stessa quantità di informazione. Il benchmark è equo.")
+            print("OK: parità informativa confermata")
         else:
-            print("ATTENZIONE: i due insiemi NON coincidono. Verificare i dati sorgente.")
+            print("ATTENZIONE: differenza infirmativa")
 
         print("=== PIPELINE ETL COMPLETATA CON SUCCESSO ===")
     else:
@@ -115,10 +107,7 @@ def run_etl():
     driver.close()
     pg_engine.dispose()
 
-# ==========================================
-# FUNZIONI DI SUPPORTO
-# ==========================================
-
+# Funzioni di supporto per il caricamento dei dati in Neo4j
 def load_airlines_neo4j(driver, df):
     query = """
     UNWIND $batch AS row
@@ -166,6 +155,7 @@ def load_flights_to_neo4j(driver, df):
     with driver.session() as session:
         session.run(query, batch=df.to_dict(orient="records"))
 
+# Funzioni per l'arricchimento topologico e la creazione della vista SQL
 def enrich_graph_topology(driver):
     print("Avvio Arricchimento Topologico: Creazione delle relazioni dirette [:ROUTE]...")
     query = """
@@ -176,7 +166,7 @@ def enrich_graph_topology(driver):
     """
     with driver.session() as session:
         session.run(query)
-    print("Arricchimento completato: Grafo Topologico pronto per il pathfinding!")
+    print("Arricchimento completato")
 
 def enrich_sql_topology(pg_engine):
     print("Avvio Arricchimento SQL: Creazione della vista materializzata 'routes'...")
@@ -193,7 +183,7 @@ def enrich_sql_topology(pg_engine):
         """))
         conn.execute(text("CREATE INDEX idx_routes_origin ON routes(origin_airport);"))
         conn.execute(text("ANALYZE routes;"))
-    print("Arricchimento SQL completato: Vista 'routes' pronta e indicizzata!")
+    print("Arricchimento SQL completato")
 
 if __name__ == "__main__":
     run_etl()

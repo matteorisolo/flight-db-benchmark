@@ -3,7 +3,7 @@
 *.tsv
 *.zip
 
-# Volumi Docker (i database fisici)
+# Volumi Docker
 pg_data/
 neo4j_data/
 neo4j_logs/
